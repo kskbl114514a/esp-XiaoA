@@ -1,0 +1,34 @@
+# ---- NDK / 构建产物 ----
+jni/libs/
+jni/obj/
+libs/
+obj/
+*.o
+*.o.d
+*.a
+*.so.debug
+
+# ---- 本地产物（prebuilt 目录是有意提交的，不在此列）----
+build*.log
+*.log
+*.bak
+*.bak_*
+*.tmp
+
+# ---- 设备/抓包数据 ----
+esp_data.bin
+*.bin.md5
+index*.js
+!js/*.js
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Python ----
+__pycache__/
+*.pyc

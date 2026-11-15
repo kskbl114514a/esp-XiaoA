@@ -1,0 +1,18 @@
+* text=auto eol=lf
+
+# 源码与脚本强制 LF（Windows 上 checkout 成 CRLF 会让 sh 脚本在设备上炸）
+*.sh    text eol=lf
+*.py    text eol=lf
+*.js    text eol=lf
+*.c     text eol=lf
+*.cpp   text eol=lf
+*.h     text eol=lf
+*.hpp   text eol=lf
+*.mk    text eol=lf
+*.md    text eol=lf
+
+# 二进制不许做任何转换
+*.so    binary
+*.a     binary
+injector_x64 binary
+*.bin   binary
