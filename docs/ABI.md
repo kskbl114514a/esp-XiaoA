@@ -1,3 +1,14 @@
+---
+AIGC:
+    Label: "1"
+    ContentProducer: 001191440300708461136T1XGW3
+    ProduceID: c7bba7cd687c3be43ccd054e5d679f26_1b9e6555e14d11f1913b525400393706
+    ReservedCode1: 2vYt8oXmlmbCMspyeCBWWhvmfIRlneCWaUu3xlNBPFaiDKOw+2hrdEOGy8wPqmF/SnZWC5f9OpbhmQAPnu8wJJ+GUjsBE6aJohBGKQ3ciMrwOushOMo1hgxO71jJlGWD8YS8RONBmTs5S7CPzXtaOGS2z1QAtscj7tt+5mbVOv/ay0VLobyVsj4CkT0=
+    ContentPropagator: 001191440300708461136T1XGW3
+    PropagateID: c7bba7cd687c3be43ccd054e5d679f26_1b9e6555e14d11f1913b525400393706
+    ReservedCode2: 2vYt8oXmlmbCMspyeCBWWhvmfIRlneCWaUu3xlNBPFaiDKOw+2hrdEOGy8wPqmF/SnZWC5f9OpbhmQAPnu8wJJ+GUjsBE6aJohBGKQ3ciMrwOushOMo1hgxO71jJlGWD8YS8RONBmTs5S7CPzXtaOGS2z1QAtscj7tt+5mbVOv/ay0VLobyVsj4CkT0=
+---
+
 # 数据通道 ABI（ESP_SHM v5）
 
 `esp_data.bin` 是 JS 写端与 Native 读端之间**唯一的契约**。两端不共享任何运行时代码，只靠这块固定布局的二进制对齐；所以本文档里的每一个偏移、每一个 `sizeof` 都必须与 `jni/src/shm_abi.h` 完全一致。
@@ -233,3 +244,4 @@ adb shell su 0 od -An -tx1 -N16 /data/local/tmp/esp_data.bin
 # 拉回电脑逐实体解析（读端 stride 与写端一致才对齐）
 adb pull /data/local/tmp/esp_data.bin
 ```
+*（内容由AI生成，仅供参考）*

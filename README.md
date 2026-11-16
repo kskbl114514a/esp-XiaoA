@@ -1,3 +1,14 @@
+---
+AIGC:
+    Label: "1"
+    ContentProducer: 001191440300708461136T1XGW3
+    ProduceID: c7bba7cd687c3be43ccd054e5d679f26_1a590b34e14d11f1913b525400393706
+    ReservedCode1: I53z9pmt99qjxIQ4Kh1NXhKlIlIndyXBelGTtkPEPdUXjz6neL0qyu4rvR0J38fg/HmfXOfWf0WhQz5NtWsJEpqhW+u5j7JpIX/arA1q4BlUEwNzh3Le8cEAfqQLpNxSowzyXVT4fXWvX1rxZYEldphcD7p9QFT16wZgKXpXTLyVi/NZpzaBJwo+AEQ=
+    ContentPropagator: 001191440300708461136T1XGW3
+    PropagateID: c7bba7cd687c3be43ccd054e5d679f26_1a590b34e14d11f1913b525400393706
+    ReservedCode2: I53z9pmt99qjxIQ4Kh1NXhKlIlIndyXBelGTtkPEPdUXjz6neL0qyu4rvR0J38fg/HmfXOfWf0WhQz5NtWsJEpqhW+u5j7JpIX/arA1q4BlUEwNzh3Le8cEAfqQLpNxSowzyXVT4fXWvX1rxZYEldphcD7p9QFT16wZgKXpXTLyVi/NZpzaBJwo+AEQ=
+---
+
 # esp-XiaoA
 
 > XiaoA 版 ESP 框架 —— Cocos Creator 3.x 手游的**原生 ImGui 悬浮菜单 + 实体透视线框**。
@@ -64,17 +75,21 @@ Cocos Creator 3.x 手游的 **原生 ImGui 悬浮菜单 + 实体透视线框** �
 │       ├── vecmath.h           向量 / 矩阵 / 投影
 │       └── log.h               logcat 封装
 ├── injector/
-│   ├── injector_x64.c          ptrace 注入器（x86_64 主机侧）
-│   └── injector.cpp            ptrace 注入器（arm64 变体）
+│   ├── injector_x64.c          ptrace 注入器（x86_64，模拟器 / houdini 环境）
+│   ├── injector_arm64.c        ptrace 注入器（aarch64，真机；AAPCS64 + user_pt_regs）
+│   └── injector.cpp            早期原型（保留参考）
 ├── js/
 │   └── esp_shm_block.js        ★ 注入到游戏 bundle 的采集块（约 14 KB）
 ├── scripts/
-│   ├── esp_v5.sh               设备端一体化脚本
+│   ├── esp_v5.sh               设备端一体化脚本（模拟器 x86_64）
+│   ├── esp_a64.sh              设备端一体化脚本（真机 arm64 + KSU/Magisk）
+│   ├── deploy_arm64.ps1        Windows 侧一键部署（校验架构/md5 → push → chmod）
 │   └── v6_patch.py             幂等打补丁器：把 esp_shm_block.js 插进 index.js
 ├── prebuilt/
-│   ├── libesp_x86_64.so        1,397,400 B
-│   ├── libesp_arm64-v8a.so     1,292,680 B
-│   └── injector_x64            12,816 B（必须用这个，见「坑」）
+│   ├── libesp_x86_64.so        1,397,400 B  x86_64（模拟器）
+│   ├── libesp_arm64-v8a.so     1,292,680 B  aarch64（真机）
+│   ├── injector_x64            12,816 B     x86_64 注入器（模拟器，必须用这个）
+│   └── arm64/inj_a64           11,080 B     aarch64 注入器（真机）
 └── docs/
     ├── ABI.md                  布局全表 + 读写时序
     └── TROUBLESHOOT.md         实战排障记录
@@ -159,6 +174,88 @@ adb shell su 0 sh /data/local/tmp/imgui/esp_v5.sh status       # 三件套文件
 - **注入前查 `/proc/<pid>/maps`**，已映射则跳过，天然幂等，不会重复注入污染进程；
 - **`e_machine` 自检**：读 so 的第 18–19 字节，`3e00` = x86_64，`b700` = aarch64，与 `getprop ro.product.cpu.abi` 比对，不匹配直接 WARN；
 - 换 JS 时先备份到 `index.js.bak_pre_v6`，写回后强制 `chmod 600` + `restorecon` + `chcon u:object_r:app_data_file:s0`。
+
+## 真机 arm64 部署（root + KernelSU）
+
+模拟器（x86_64 + houdini）那一套**不能**直接搬到真机。真机是纯 arm64 环境，缺两样东西：**arm64 版注入器**，以及**能被目标进程合法 dlopen 的 so 路径**。本仓库两条都已备好。
+
+### 与模拟器的差异对照
+
+| 项目 | 模拟器 / houdini | 真机 arm64 |
+|---|---|---|
+| 注入器 | `prebuilt/injector_x64`（12,816 B, x86_64） | `prebuilt/arm64/inj_a64`（11,080 B, aarch64） |
+| 被注入模块 | `prebuilt/libesp_x86_64.so` | `prebuilt/libesp_arm64-v8a.so` |
+| 寄存器读法 | x86_64 `struct user_regs_struct` + SysV 传参 | arm64 `struct user_pt_regs`(272B) + AAPCS64(x0..x7) |
+| 返回哨兵 | 栈上写 0，`ret` 跳 0 | `x30(LR)=0`，`ret`/`br x30` 跳 0 |
+| 栈对齐 | `rsp%16==8`（有返回地址） | `sp` 必须 16 对齐（无栈上返回地址） |
+| so 放置位置 | `/data/local/tmp/imgui/` 可直接 dlopen | **必须**进 App native lib 目录（见下） |
+| 提权 | `su 0 sh ...` | `su -c "sh ..."`（KSU/Magisk 均可） |
+
+### 1. 编 arm64 注入器
+
+```bash
+cd injector
+$NDK/ndk-build.cmd NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk \
+                  NDK_APPLICATION_MK=Application.mk NDK_OUT=obj NDK_LIBS_OUT=libs -j4
+# 产物: libs/arm64-v8a/inj_a64  (aarch64, PIE, md5 c109c3460b2fa62750035d7994b92d0a)
+#       libs/x86_64/inj_x64      (模拟器那份，同一工程一并出)
+```
+
+`injector/Android.mk` 按 `TARGET_ARCH_ABI` 条件构建两个模块，互不干扰：`injector_arm64.c` 里有 `#error` 守卫，误编到 x86_64 会直接报错而不是产出垃圾。
+
+### 2. 推文件
+
+```bash
+D=/data/local/tmp/imgui
+adb push prebuilt/arm64/inj_a64        $D/inj_a64
+adb push prebuilt/libesp_arm64-v8a.so  $D/libesp_arm64.so
+adb push scripts/esp_a64.sh            $D/esp_a64.sh
+adb push js/esp_shm_block.js           $D/index_v6.js
+adb shell su -c "chmod 755 $D/inj_a64; ls -l $D"
+```
+
+### 3. 关键坑：so 不能放在 /data/local/tmp
+
+真机上 `dlopen("/data/local/tmp/imgui/libesp.so")` 会被两重机制挡掉：
+
+1. **linker namespace**：`library "..." is not accessible for the namespace "classloader-namespace"` —— App 进程的 namespace 只允许 `/data/app/<pkg>*/lib/arm64`、`/system/lib64`、`/apex/...` 等路径；
+2. **SELinux**：`/data/local/tmp` 是 `shell_data_file`，app 域无读权限（`avc: denied { read }`）。
+
+所以脚本会把 so 铺到 App 的 native lib 目录再 dlopen：
+
+```bash
+LIBDIR=$(grep -m1 '/lib/arm64/' /proc/$PID/maps | awk '{print $6}' | xargs dirname)
+cp -f $D/libesp_arm64.so $LIBDIR/libesp_a64.so
+chmod 644 $LIBDIR/libesp_a64.so && restorecon $LIBDIR/libesp_a64.so
+# 注入目标就是 $LIBDIR/libesp_a64.so
+```
+
+lib 目录名带随机 hash（`/data/app/~~xxxx==/<pkg>-yyyy==/lib/arm64`），**不能写死**，脚本用运行中进程的 maps 反查。
+
+### 4. 跑
+
+```bash
+# 一步到位（换 JS + 冷启动；auto 会等 45s 供你进对局后自动注入）
+adb shell su -c "sh /data/local/tmp/imgui/esp_a64.sh all auto"
+
+# 或者手动控时序：起游戏 → 进对局/训练场 → 注入
+adb shell su -c "sh /data/local/tmp/imgui/esp_a64.sh all nojs"
+adb shell su -c "sh /data/local/tmp/imgui/esp_a64.sh inject"   # 进对局后再执行
+adb shell su -c "sh /data/local/tmp/imgui/esp_a64.sh verify"
+```
+
+时序铁律：**大厅里 `Scene`/`Camera` 指针为 0，vtable 扫描命中 0 次**，必须进对局或训练场再注入；模块内每 30 帧复检 `pickCam()`，相机换指针会自动重建层，所以即便早注入了，切进对局也会自己补上。
+
+### 5. 验收
+
+```bash
+grep -c libesp_a64.so /proc/$(pidof com.fmgame.pubg.aligames)/maps   # 必须 = 3
+logcat -d -s esp:V | grep -E "esp.so|hook\(|GL_VERSION|ImGui|surface|\[shm\]"
+```
+
+映射段数为 0 时，先看 `logcat -d | grep -E "not accessible for the namespace|avc: *denied"`：
+- 命中 namespace → so 没进 lib 目录（stage 失败 / 用了 `/data/local/tmp` 路径）
+- 命中 avc → `restorecon` 没做或 SELinux 策略过严，必要时临时 `setenforce 0` 验证
 
 ## 数据通道 ABI (v5)
 
@@ -303,3 +400,4 @@ od -An -tx1 -N2 -j18 libesp.so     # 3e00 = x86_64 / b700 = aarch64
 MIT，见 [LICENSE](LICENSE)。
 
 第三方组件：Dear ImGui（MIT）、And64InlineHook（Apache-2.0）。
+*（内容由AI生成，仅供参考）*
