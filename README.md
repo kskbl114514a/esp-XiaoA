@@ -45,7 +45,7 @@ Cocos Creator 3.x 手游的 **原生 ImGui 悬浮菜单 + 实体透视线框** �
 - **屏幕坐标预计算**：`worldToScreen` 在 JS 侧完成，写归一化 `0..1` 屏幕坐标，读端乘视口尺寸即得像素，与设备分辨率/画布缩放彻底解耦。
 - **子弹提前量在 JS 侧解算**：飞行时间、下坠、落点屏幕坐标都算好再写进来，C++ 只管画圈和十字。
 - **两套 ABI 预编译**：`x86_64`（模拟器）与 `arm64-v8a`（真机），脚本自动校验 `e_machine` 防推错架构。
-- **一体化运维脚本**：单文件 `esp_v5.sh`，`all / inject / verify / rollback / status` 五个子命令，幂等可重入。
+- **一体化运维脚本**：单文件 `esp.sh`，`all / stage / start / stop / restart / inject / verify / rollback / status / log / cfg` 子命令，运行时按 `ro.product.cpu.abi` 自动分派模拟器 x86_64 与真机 arm64 两条链路，幂等可重入。
 
 ## 目录结构
 
@@ -81,8 +81,7 @@ Cocos Creator 3.x 手游的 **原生 ImGui 悬浮菜单 + 实体透视线框** �
 ├── js/
 │   └── esp_shm_block.js        ★ 注入到游戏 bundle 的采集块（约 14 KB）
 ├── scripts/
-│   ├── esp_v5.sh               设备端一体化脚本（模拟器 x86_64）
-│   ├── esp_a64.sh              设备端一体化脚本（真机 arm64 + KSU/Magisk）
+│   ├── esp.sh                  设备端一体化脚本（x86_64 模拟器 + arm64 真机，单文件自动适配）
 │   ├── deploy_arm64.ps1        Windows 侧一键部署（校验架构/md5 → push → chmod）
 │   └── v6_patch.py             幂等打补丁器：把 esp_shm_block.js 插进 index.js
 ├── prebuilt/
@@ -123,7 +122,7 @@ ndk-build.cmd NDK_PROJECT_PATH=. \
 
 ```
 /data/local/tmp/imgui/
-├── esp_v5.sh                 chmod 755
+├── esp.sh                    chmod 755   ← 单脚本管两平台
 ├── inj_a                     chmod 755   ← prebuilt/injector_x64
 ├── libesp_only.so            chmod 644   ← prebuilt/libesp_x86_64.so（按 ABI 选）
 ├── libesp_only_arm64.so      chmod 644   ← prebuilt/libesp_arm64-v8a.so
@@ -133,12 +132,12 @@ ndk-build.cmd NDK_PROJECT_PATH=. \
 
 ```bash
 adb shell mkdir -p /data/local/tmp/imgui
-adb push esp_v5.sh        /data/local/tmp/imgui/esp_v5.sh
+adb push esp.sh           /data/local/tmp/imgui/esp.sh
 adb push injector_x64     /data/local/tmp/imgui/inj_a
 adb push libesp_x86_64.so /data/local/tmp/imgui/libesp_only.so
 adb push index_v6.js      /data/local/tmp/imgui/index_v6.js
 adb push index_v3.js      /data/local/tmp/imgui/index_v3.js
-adb shell chmod 755 /data/local/tmp/imgui/esp_v5.sh /data/local/tmp/imgui/inj_a
+adb shell chmod 755 /data/local/tmp/imgui/esp.sh /data/local/tmp/imgui/inj_a
 ```
 
 ### 3. 打 JS 补丁
@@ -160,13 +159,17 @@ python scripts/v6_patch.py \
 
 ### 4. 跑
 
+> `esp.sh` 在 arm64 设备上跑 `all`/`inject` 时会自动 `stage`（把 so 铺进 App native lib 目录 + chown/chmod 644/restorecon），无需手动 cp。
+
 ```bash
-adb shell su 0 sh /data/local/tmp/imgui/esp_v5.sh             # 换 JS + 冷启动 + 注入 + 体检
-adb shell su 0 sh /data/local/tmp/imgui/esp_v5.sh all nojs     # 不换 JS，只注入
-adb shell su 0 sh /data/local/tmp/imgui/esp_v5.sh inject       # 只注入当前进程
-adb shell su 0 sh /data/local/tmp/imgui/esp_v5.sh verify       # 只读体检
-adb shell su 0 sh /data/local/tmp/imgui/esp_v5.sh rollback     # 恢复基线 index.js
-adb shell su 0 sh /data/local/tmp/imgui/esp_v5.sh status       # 三件套文件状态 + ABI 自检
+adb shell su 0 sh /data/local/tmp/imgui/esp.sh             # 换 JS + 冷启动 + 注入 + 体检
+adb shell su 0 sh /data/local/tmp/imgui/esp.sh all nojs     # 不换 JS，只注入
+adb shell su 0 sh /data/local/tmp/imgui/esp.sh inject       # 只注入当前进程
+adb shell su 0 sh /data/local/tmp/imgui/esp.sh verify       # 只读体检
+adb shell su 0 sh /data/local/tmp/imgui/esp.sh rollback     # 恢复基线 index.js
+adb shell su 0 sh /data/local/tmp/imgui/esp.sh status       # 文件/ABI/libdir/SELinux 全览
+adb shell su 0 sh /data/local/tmp/imgui/esp.sh log          # 实时过滤引擎日志
+adb shell su 0 sh /data/local/tmp/imgui/esp.sh cfg          # 查看悬浮窗配置
 ```
 
 脚本行为要点：
@@ -209,7 +212,7 @@ $NDK/ndk-build.cmd NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk \
 D=/data/local/tmp/imgui
 adb push prebuilt/arm64/inj_a64        $D/inj_a64
 adb push prebuilt/libesp_arm64-v8a.so  $D/libesp_arm64.so
-adb push scripts/esp_a64.sh            $D/esp_a64.sh
+adb push scripts/esp.sh                $D/esp.sh
 adb push js/esp_shm_block.js           $D/index_v6.js
 adb shell su -c "chmod 755 $D/inj_a64; ls -l $D"
 ```
@@ -234,14 +237,16 @@ lib 目录名带随机 hash（`/data/app/~~xxxx==/<pkg>-yyyy==/lib/arm64`），*
 
 ### 4. 跑
 
+> `esp.sh` 在 arm64 设备上跑 `all`/`inject` 时会自动 `stage`（把 so 铺进 App native lib 目录 + chown/chmod 644/restorecon），无需手动 cp。
+
 ```bash
 # 一步到位（换 JS + 冷启动；auto 会等 45s 供你进对局后自动注入）
-adb shell su -c "sh /data/local/tmp/imgui/esp_a64.sh all auto"
+adb shell su -c "sh /data/local/tmp/imgui/esp.sh all auto"
 
 # 或者手动控时序：起游戏 → 进对局/训练场 → 注入
-adb shell su -c "sh /data/local/tmp/imgui/esp_a64.sh all nojs"
-adb shell su -c "sh /data/local/tmp/imgui/esp_a64.sh inject"   # 进对局后再执行
-adb shell su -c "sh /data/local/tmp/imgui/esp_a64.sh verify"
+adb shell su -c "sh /data/local/tmp/imgui/esp.sh all nojs"
+adb shell su -c "sh /data/local/tmp/imgui/esp.sh inject"   # 进对局后再执行
+adb shell su -c "sh /data/local/tmp/imgui/esp.sh verify"
 ```
 
 时序铁律：**大厅里 `Scene`/`Camera` 指针为 0，vtable 扫描命中 0 次**，必须进对局或训练场再注入；模块内每 30 帧复检 `pickCam()`，相机换指针会自动重建层，所以即便早注入了，切进对局也会自己补上。
