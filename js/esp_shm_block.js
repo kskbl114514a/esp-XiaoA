@@ -4,14 +4,16 @@
  *   does worldToScreen inside the game, packs ShmHeader(esp_data.bin) and
  *   lets libesp.so's ImGui layer draw boxes WITHOUT any view matrix.
  *
- * Layout MUST stay in sync with jni/src/shm_abi.h (asserted by shm_abi_test.py):
+ * Layout MUST stay in sync with jni/src/shm_abi.h (asserted by shm_abi_test.py).
+ * 下面一律是「相对文件头 0 字节」的**绝对偏移**，与下方 VO_*/O_* 常量逐字对应：
  *   ShmHeader: magic u32@0 version u32@4 seq u64@8 view@16 count i32@104 pad@108 ents@112
- *   ShmView  : viewProj[16]@0 camPos[3]@64 fovY@76 viewW@80 viewH@84   (size 88)
+ *   ShmView  : viewProj[16]@16 camPos[3]@80 fovY@92 viewW@96 viewH@100  (size 88, 起于 16)
  *   ShmEntity: id u64@0 head[3]@8 chest[3]@20 pelvis[3]@32 feet[3]@44 vel[3]@56
  *              hp@68 maxHp@72 dist@76 flags u32@80 name[32]@84 hasBones u8@116
  *              screenSpace u8@117 pad[2]@118 bones[15][3]@120 sHead[2]@300
  *              sChest[2]@308 sFeet[2]@316 sLead[2]@324 leadM@332 dropM@336 tFly@340
- *              (size 344)
+ *              camp i32@344 aiLevel i32@348 liveState i32@352 pad@356
+ *              (size 360)
  * --------------------------------------------------------------- */
 ;globalThis.__ESPSHM__=(function(){var G=globalThis;
 var CFG=G.__ESP_CFG__||{
@@ -51,11 +53,22 @@ function wdir(){
   try{ if(typeof jsb!=="undefined"&&jsb.fileUtils&&jsb.fileUtils.getWritablePath)return jsb.fileUtils.getWritablePath(); }catch(e){}
   return "";
 }
-var ioTag="";
+var ioTag="",ioSz=-1;
+// Cocos Creator 3.8 签名：writeDataToFile(data: ArrayBuffer, filePath: string) —— data 在前！
+// 旧代码 (path,u8) 会被 jsb_conversions_spec.cpp 拒绝：Convert parameter to Data failed!
+// 且 C++ 层只打 E 日志、不抛 JS 异常 -> return !0 谎报成功，文件从未被创建。
+function _fsz(fu,q){ try{ if(fu&&fu.getFileSize)return fu.getFileSize(q)|0; }catch(e){} return -1; }
 function wbin(path){
-  try{ if(typeof native!=="undefined"&&native.fileUtils&&native.fileUtils.writeDataToFile){ native.fileUtils.writeDataToFile(path,u8); ioTag="native"; return !0; } }catch(e){ ioTag="native:err"; }
-  try{ if(typeof jsb!=="undefined"&&jsb.fileUtils&&jsb.fileUtils.writeDataToFile){ jsb.fileUtils.writeDataToFile(path,u8); ioTag="jsb"; return !0; } }catch(e){ ioTag="jsb:err"; }
-  return !1;
+  var fu=null;
+  try{ if(typeof native!=="undefined"&&native.fileUtils)fu=native.fileUtils; }catch(e){}
+  if(!fu){ try{ if(typeof jsb!=="undefined"&&jsb.fileUtils)fu=jsb.fileUtils; }catch(e){} }
+  if(!fu||!fu.writeDataToFile){ ioTag="none"; return !1; }
+  var ok=!1;
+  try{ fu.writeDataToFile(buf,path); ok=!0; ioTag="ab"; }catch(e){ ioTag="ab:err"; }
+  if(!ok){ try{ fu.writeDataToFile(u8,path); ok=!0; ioTag="u8"; }catch(e){ ioTag="u8:err"; } }
+  ioSz=_fsz(fu,path);
+  if(ioSz!==HDR_SZ)return !1;
+  return ok;
 }
 
 /* ---------------- math / cc helpers ---------------- */
@@ -80,7 +93,7 @@ function projW2S(cam,x,y,z,vw,vh,out){
     return !0;
   }catch(e){ return !1; }
 }
-var FLIP=1,FLIPDONE=!1;
+var FLIP=1,FLIPN=0;   // FLIP 不再一次性固化：相机/画布方向变化后每 300 帧重判一次
 
 function pickCam(logic){
   try{
@@ -151,18 +164,26 @@ function packEnt(base,o,cam,camP,vw,vh,selfCamp,selfId,dist){
   dv.setFloat32(base+O_DIST,f32(dist),!0);
 
   var flags=0;
-  if(d.camp!==void 0&&selfCamp&&d.camp===selfCamp)flags|=F_TEAM;
+  var rc=(o.rawCamp!==void 0&&o.rawCamp!==null&&isFinite(o.rawCamp))?o.rawCamp:d.camp;
+  var sc=(selfCamp!==void 0&&selfCamp!==null&&isFinite(selfCamp))?selfCamp:0;
+  if(rc!==void 0&&sc&&rc===sc)flags|=F_TEAM;
   if(d.liveState===1)flags|=F_DEAD;
 
   // screen coords (0..1, origin top-left) -- read side multiplies by viewport
   var okH=projW2S(cam,h.x,h.y,h.z,vw,vh,_t4);
   var okF=projW2S(cam,f.x,f.y,f.z,vw,vh,_t5);
   var okC=projW2S(cam,c.x,c.y,c.z,vw,vh,_t6);
-  if(!FLIPDONE&&okH&&okF){
-    // cocos y-up: head raw y > feet raw y  => needs flip (normal case)
-    FLIP=(_t4[1]>_t5[1])?1:0;
-    FLIPDONE=!0;
-    try{ console.warn("[ESPSHM] yflip="+FLIP+" headY="+_t4[1].toFixed(3)+" footY="+_t5[1].toFixed(3)); }catch(e){}
+  if(okH&&okF){
+    // cocos y-up: head raw y > feet raw y => 需要翻转（常规情况）。
+    // 原实现只在第一帧判一次并永久固化，首帧若取到观战/加载相机，后面整局 y 都是反的。
+    FLIPN++;
+    if(FLIPN===1||(FLIPN%300)===0){
+      var want=(_t4[1]>_t5[1])?1:0;
+      if(want!==FLIP){
+        FLIP=want;
+        try{ console.warn("[ESPSHM] yflip="+FLIP+" n="+FLIPN+" headY="+_t4[1].toFixed(3)+" footY="+_t5[1].toFixed(3)); }catch(e){}
+      }
+    }
   }
   if(FLIP===1){ if(okH)_t4[1]=1-_t4[1]; if(okF)_t5[1]=1-_t5[1]; if(okC)_t6[1]=1-_t6[1]; }
 
@@ -174,8 +195,17 @@ function packEnt(base,o,cam,camP,vw,vh,selfCamp,selfId,dist){
     if(okC){dv.setFloat32(base+O_SC,f32(_t6[0]),!0);dv.setFloat32(base+O_SC+4,f32(_t6[1]),!0);}
     else   {dv.setFloat32(base+O_SC,f32((_t4[0]+_t5[0])*0.5),!0);dv.setFloat32(base+O_SC+4,f32((_t4[1]+_t5[1])*0.5),!0);}
   }else{
+    // buffer 是复用的：不清零就残留**上一个实体**的 sChest/sHead，
+    // 读端一旦按别的条件取用，画出来的胸点属于别人。
     dv.setUint8(base+O_SS,0);
+    dv.setFloat32(base+O_SH,0,!0);dv.setFloat32(base+O_SH+4,0,!0);
+    dv.setFloat32(base+O_SC,0,!0);dv.setFloat32(base+O_SC+4,0,!0);
+    dv.setFloat32(base+O_SF,0,!0);dv.setFloat32(base+O_SF+4,0,!0);
   }
+  // 提前量字段同理：本帧不解算就必须清掉，否则 flags 没置 F_LEAD、数值却是上一个人的
+  if(!(CFG.lead&&camP)){ flags&=~F_LEAD;
+    dv.setFloat32(base+O_SL,0,!0);dv.setFloat32(base+O_SL+4,0,!0);
+    dv.setFloat32(base+O_LM,0,!0);dv.setFloat32(base+O_DM,0,!0);dv.setFloat32(base+O_FT,0,!0); }
 
   // bullet-track lead: solve with velocity, project the lead point
   if(CFG.lead&&camP&&dist<=Math.max(CFG.bulletSpeed,50)*3){
@@ -184,21 +214,27 @@ function packEnt(base,o,cam,camP,vw,vh,selfCamp,selfId,dist){
     if(solveLead(cam,camP,vw,vh,tg,_vel,Math.max(50,CFG.bulletSpeed||900),CFG.gravity||0,_ld)){
       var lx=_ld.s[0],ly=_ld.s[1];
       if(FLIP===1)ly=1-ly;
-      var dm=Math.sqrt((_ld.wx-camP.x)*(_ld.wx-camP.x)+(_ld.wy-camP.y)*(_ld.wy-camP.y)+(_ld.wz-camP.z)*(_ld.wz-camP.z));
+      // 与 C++ Solve().leadMeters 同语义：|vel| * 飞行时间（提前量位移长度，米）。
+      // 原写法拿「相机→预测点距离 − 相机→脚距离」的绝对值冒充，量纲对、数值不是一回事。
+      var vmag=Math.sqrt(_vel.x*_vel.x+_vel.y*_vel.y+_vel.z*_vel.z);
+      var lm=vmag*_ld.t;
       flags|=F_LEAD;
       dv.setFloat32(base+O_SL,f32(lx),!0);dv.setFloat32(base+O_SL+4,f32(ly),!0);
-      dv.setFloat32(base+O_LM,f32(Math.abs(dm-dist)),!0);   // 与 C++ Solve().leadMeters 同语义：位移长度(米)，非负
+      dv.setFloat32(base+O_LM,f32(lm),!0);
       dv.setFloat32(base+O_DM,f32(_ld.drop),!0);
       dv.setFloat32(base+O_FT,f32(_ld.t),!0);
     }
   }
 
   dv.setUint32(base+O_FLAGS,flags,!0);
+  // JS 侧不产骨骼（bones[15] 恒 0），显式写 hasBones=0，
+  // 读端据此走「只有头/胸/脚」的退化分支，不会去画一坨 (0,0,0) 的假骨骼。
   dv.setUint8(base+O_HB,0);
   var nm=o.name;
   for(var i=0;i<32;i++)dv.setUint8(base+O_NAME+i,0);
-  var lim=nm.length<31?nm.length:31;
-  for(i=0;i<lim;i++){var ch=nm.charCodeAt(i);dv.setUint8(base+O_NAME+i,ch<128?ch:63);}
+  // 名字按 UTF-8 写入（原写法把 >127 的字符统统一脚踩成 '?'，中文昵称在 ImGui 上就是 "????????"）
+  var bytes=utf8(nm,31);
+  for(i=0;i<bytes.length;i++)dv.setUint8(base+O_NAME+i,bytes[i]);
 
   // ---- v5：把 JS 判定用的原始字段透传给 ImGui 侧（-1 表示游戏未提供）
   var cm=o.rawCamp,ai=o.rawAi,ls=o.rawLive;
@@ -210,6 +246,26 @@ function packEnt(base,o,cam,camP,vw,vh,selfCamp,selfId,dist){
 function f32(v){
   if(typeof v!=="number"||!isFinite(v))return 0;
   return v;
+}
+var _uenc=null;
+// 写 name[32] 的 UTF-8 编码器：Cocos 的 JS 是 UTF-16，直接取 charCodeAt 写字节只能得到 ASCII
+function utf8(str,cap){
+  var out=[];
+  if(!str)return out;
+  if(typeof TextEncoder!=="undefined"){
+    if(!_uenc)_uenc=new TextEncoder();
+    var b=_uenc.encode(""+str);
+    for(var i=0;i<b.length&&out.length<cap;i++)out.push(b[i]);
+    return out;
+  }
+  for(var j=0;j<str.length&&out.length<cap;j++){
+    var c=str.charCodeAt(j);
+    if(c<0x80)out.push(c);
+    else if(c<0x800){out.push(0xc0|(c>>6),0x80|(c&0x3f));}
+    else if(c<0xd800||c>0xdfff){out.push(0xe0|(c>>12),0x80|((c>>6)&0x3f),0x80|(c&0x3f));}
+    else out.push(0x3f);
+  }
+  return out;
 }
 function num(v){ return (typeof v==="number"&&isFinite(v))?v:0; }
 function vec3ish(p){ if(!p)return null; if(!isFinite(p.x)||!isFinite(p.y)||!isFinite(p.z))return null; return p; }
@@ -243,6 +299,8 @@ G.__ESP_COL__=function(logic,list,S,R){try{
   var n=0,maxE=CFG.maxEnts||64;
   for(var key in list){
     if(n>=maxE)break;
+    // for-in 会带出原型链属性：少了这行，同一实体可能被采集多次，白占 maxEnts 名额
+    if(!Object.prototype.hasOwnProperty.call(list,key))continue;
     try{
       var t=list[key];
       if(!t||!t.CharacterCom)continue;
@@ -251,8 +309,11 @@ G.__ESP_COL__=function(logic,list,S,R){try{
       var d=com.data; if(!d)continue;
       var id=(com.id!==void 0?com.id:d.id)|0;
       if(!id||id===selfId)continue;
-      if(d.hp<=0)continue;
+      // 只跳过「确认死亡」（liveState==1）。hp<=0 但还没死亡（倒地/濒死）必须写出去，
+      // 否则 ImGui 侧的 hideKnocked 永远收不到 liveState==2 的实体，开关形同虚设。
+      if(d.liveState===1)continue;
       if(CFG.skipDead&&d.liveState!==void 0&&d.liveState!==0)continue;
+      if(d.hp<=0&&d.liveState===void 0)continue;
       if(CFG.onlyReal&&d.aiLevel!==void 0&&d.aiLevel>0)continue;
 
       var mv=t.Movement&&t.Movement.state&&t.Movement.state.position;
@@ -290,10 +351,12 @@ G.__ESP_COL__=function(logic,list,S,R){try{
   dv.setUint32(8,seq,!0);
   dv.setUint32(12,0,!0);
 
-  var dir=wdir(),ok=wbin(dir+"esp_data.bin");
+  var dir=wdir(),ok=!1;
+  if(!dir)ioTag="nodir";                     // 拿不到可写目录就直写相对路径 = 落到游戏 CWD，基本必失败
+  else ok=wbin(dir+"esp_data.bin");
   G.__ESPSHM_N__=(G.__ESPSHM_N__||0)+1;
   if(G.__ESPSHM_N__===1||G.__ESPSHM_N__%60===0){
-    try{console.warn("[ESPSHM] n="+n+" ok="+ok+" io="+ioTag+" cam="+(cam?"y":"n")+" "+vw+"x"+vh+" vh="+(vh|0)+" dir="+dir+" flip="+FLIP);}catch(e){}
+    try{console.warn("[ESPSHM] n="+n+" ok="+ok+" io="+ioTag+" sz="+ioSz+" cam="+(cam?"y":"n")+" "+vw+"x"+vh+" vh="+(vh|0)+" dir="+dir+" flip="+FLIP);}catch(e){}
   }
 }catch(e){}};
 

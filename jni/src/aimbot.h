@@ -1,5 +1,8 @@
 // aimbot.h
 #pragma once
+// 本文件是【备用】自瞄实现：走 Java MotionEvent 注入(java_bridge)落地。
+// 当前线上主用 TouchAim(uinput 独立 slot 虚拟手指)，见 touchaim.cpp。
+// 保留原因：某些 ROM 屏蔽 /dev/uinput 时可切回这条通道。
 #include "sensor.h"
 
 namespace Aim {

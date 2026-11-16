@@ -25,6 +25,7 @@ struct EspConfig {
     bool  drawCrosshair   = true;
     bool  showFov         = false;
     float boxThickness    = 1.6f;
+    float boxRatio        = 0.52f;    // 框宽 = 框高 * 该比例（0.4~0.7，原来硬编码 0.52）
     float maxDistance     = 400.0f;   // 超过该距离不画
     float skeletonThick   = 1.4f;
     // ---- v5：来自 JS 的判定字段（camp / aiLevel / liveState）过滤开关
@@ -44,7 +45,7 @@ struct EspConfig {
     float colLead[4]      = {1.00f, 0.35f, 1.00f, 1.0f};   // 提前量落点（品红）
 
     // ---------- 自瞄
-    bool  aimEnabled      = false;     // 触摸自瞄总开关（默认开，实机可直接试）
+    bool  aimEnabled      = false;     // 触摸自瞄总开关（默认【关】，需在菜单"自瞄"页或 ini 里打开）
     bool  aimOnFireOnly   = true;     // 仅在开火时吸附
     bool  aimVisibleOnly  = true;     // 只锁可见目标
     bool  aimIgnoreTeam   = true;
@@ -95,6 +96,7 @@ struct EspConfig {
     float btFovPx         = 420.0f;   // 屏幕像素半径（1080p 基准）
     float btArcSegments   = 16.0f;    // 弹道分段数
     bool  btLiveCamera    = true;     // 渲染时实时读相机矩阵（消除转视角滞后，核心低延迟项）
+    bool  btIgnoreTeam    = true;      // 子弹追踪跳过队友队（与自己同 camp 的实体不参与解算）
 
     // ---------- 数据源
     int   sensorMode      = 3;        // 0=Native 场景遍历 1=矩阵启发 2=强制外部写入(shm) 3=自动优先JS数据

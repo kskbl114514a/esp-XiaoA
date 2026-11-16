@@ -12,6 +12,11 @@ static inline ImU32 C(const float col[4], float a = 1.f) {
     return ImGui::ColorConvertFloat4ToU32(ImVec4(col[0], col[1], col[2], col[3] * a));
 }
 
+// 归一化屏幕坐标是否可用（JS 未写入的字段全是 0，不能当成"左上角真实坐标"）
+static inline bool NormOk(float r) { return r > -0.05f && r < 1.05f; }
+// 框的最小像素高度：固定 4px 在 1080p 上还行，在 720p/小视口会把远点实体全滤掉
+static inline float MinBoxPx() { return 3.f * Render::UiScale(); }
+
 // 把实体世界坐标投到屏幕；返回是否可见
 static void ProjectEntity(const ViewInfo& v, Entity& e) {
     const int sw = v.viewW, sh = v.viewH;
@@ -20,26 +25,38 @@ static void ProjectEntity(const ViewInfo& v, Entity& e) {
     // ---- v4：JS 端在游戏里已经做过 worldToScreen，屏幕坐标是 0..1 归一化比例，
     //      直接乘视口尺寸即可。不再走矩阵 —— 场景遍历拿到的矩阵和真实渲染矩阵不匹配。
     if (e.screenSpace && sw > 0 && sh > 0) {
+        // 先校验归一化值：JS 侧没写成功的字段是 0，乘出来是 (0,0)，
+        // 原来会把框画到屏幕左上角并且还判成"可见"。
+        if (!NormOk(e.screenHeadX) || !NormOk(e.screenHeadY) ||
+            !NormOk(e.screenFeetX) || !NormOk(e.screenFeetY)) return;
         e.sHead.x  = e.screenHeadX  * sw;  e.sHead.y  = e.screenHeadY  * sh;
         e.sChest.x = e.screenChestX * sw;  e.sChest.y = e.screenChestY * sh;
         e.sFeet.x  = e.screenFeetX  * sw;  e.sFeet.y  = e.screenFeetY  * sh;
-        e.sPelvis  = e.sChest;
+        // 骨盆不再直接等于胸：`e.sPelvis = e.sChest` 会让骨骼链 PLV→LH/RH 整段错位，
+        // 按「胸 → 脚」0.45 插值，贴合人体比例。
+        e.sPelvis.x = e.sChest.x;
+        e.sPelvis.y = e.sChest.y + (e.sFeet.y - e.sChest.y) * 0.45f;
         const float hs = e.sFeet.y - e.sHead.y;
-        e.onScreen = (hs > 4.f && hs < sh * 1.5f);
+        // 原来只看高度差，屏幕外横向几千像素的实体照样画；补一个 x 粗筛。
+        e.onScreen = (hs > MinBoxPx() && hs < sh * 1.5f) &&
+                     e.sHead.x > -sw && e.sHead.x < sw * 2.f;
         return;
     }
 
+    if (!v.hasProj) return;     // 没有有效相机矩阵（v5 的 JS 写入端不填 MVP），别拿 0 去乘
     if (!W2S(v.viewProj, e.head, e.sHead, sw, sh)) return;
     if (!W2S(v.viewProj, e.feet, e.sFeet, sw, sh)) return;
-    if (W2S(v.viewProj, e.chest, e.sChest, sw, sh) == false) e.sChest = e.sHead;
-    if (W2S(v.viewProj, e.pelvis, e.sPelvis, sw, sh) == false) e.sPelvis = e.sChest;
+    if (!W2S(v.viewProj, e.chest, e.sChest, sw, sh)) e.sChest = e.sHead;
+    if (!W2S(v.viewProj, e.pelvis, e.sPelvis, sw, sh)) e.sPelvis = e.sChest;
     if (e.hasBones) {
+        // 注意：这里的 hasBones 只表示"本帧骨骼投影成功与否"，Entity 每帧由 sensor 重建，
+        // 不会污染下一帧的原始数据。
         for (int i = 0; i < BoneIdx::Count; ++i)
             if (!W2S(v.viewProj, e.bones[i], e.sBones[i], sw, sh)) { e.hasBones = false; break; }
     }
     // 过滤异常尺寸（模型很远时框会退化成点）
     const float h = e.sFeet.y - e.sHead.y;
-    e.onScreen = (h > 4.f && h < sh * 1.5f);
+    e.onScreen = (h > MinBoxPx() && h < sh * 1.5f);
 }
 
 void Draw(ImDrawList* dl, const ViewInfo& v, std::vector<Entity>& ents) {
@@ -68,12 +85,14 @@ void Draw(ImDrawList* dl, const ViewInfo& v, std::vector<Entity>& ents) {
         if (g_cfg.hideAI && e.isAI) continue;
         if (g_cfg.hideKnocked && e.isKnocked) continue;
         if (g_cfg.onlyEnemy && e.isTeam) continue;
+        if (g_cfg.maxDistance > 0.f && e.distance > g_cfg.maxDistance) continue;
         ProjectEntity(v, e);
         if (!e.onScreen) continue;
-        if (e.distance > g_cfg.maxDistance && g_cfg.maxDistance > 0) continue;
 
         const float boxH = e.sFeet.y - e.sHead.y;
-        const float boxW = boxH * 0.52f;                 // 人体宽高比
+        // 宽高比改配置项（原来硬编码 0.52，不同分辨率/角色模型下框会明显偏窄/偏宽）
+        const float ratioW = ClampF(g_cfg.boxRatio, 0.20f, 1.20f);
+        const float boxW = boxH * ratioW;
         const ImVec2 tl(e.sHead.x - boxW * 0.5f, e.sHead.y);
         const ImVec2 br(e.sHead.x + boxW * 0.5f, e.sFeet.y);
 
@@ -147,7 +166,12 @@ void Draw(ImDrawList* dl, const ViewInfo& v, std::vector<Entity>& ents) {
         }
         if (g_cfg.drawName && e.name[0]) {
             ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.f, e.name);
-            ImVec2 p(e.sHead.x - ts.x * 0.5f, tl.y - ts.y - 2.f * Render::UiScale());
+            // 贴边实体的名字原来会有一半画到屏幕外，夹一下
+            const float pad = 2.f * Render::UiScale();
+            float nx = e.sHead.x - ts.x * 0.5f;
+            if (nx < pad) nx = pad;
+            if (nx + ts.x > sw - pad) nx = sw - pad - ts.x;
+            ImVec2 p(nx, tl.y - ts.y - 2.f * Render::UiScale());
             dl->AddText(ImGui::GetFont(), fs, ImVec2(p.x + 1, p.y + 1), IM_COL32(0, 0, 0, 190), e.name);
             dl->AddText(ImGui::GetFont(), fs, p, C(g_cfg.colText), e.name);
         }
@@ -161,8 +185,10 @@ void Draw(ImDrawList* dl, const ViewInfo& v, std::vector<Entity>& ents) {
         // ---- v5：JS 解算的提前量落点（flags bit4）。JS 已把预瞄点转成归一化屏幕坐标，
         //      C++ 侧不再做任何弹道计算，只做一次视口换算 + 画点。
         if (g_cfg.drawLeadPoint && e.hasLead) {
+            // 与 bullet_track 的口径统一：归一化坐标必须落在 [0,1]（±0.05 容差），
+            // 原来这里用 (-sw, 2sw) 判、Track 用 (>0 || >0) 判，两处对"可见"的定义互相打架。
             const float lx = e.leadScrX * sw, ly = e.leadScrY * sh;
-            if (lx > -sw && lx < sw * 2.f && ly > -sh && ly < sh * 2.f) {
+            if (NormOk(e.leadScrX) && NormOk(e.leadScrY)) {
                 const float r  = 4.0f * Render::UiScale();
                 const float th = 1.6f * Render::UiScale();
                 const ImU32 lc = C(g_cfg.colLead);

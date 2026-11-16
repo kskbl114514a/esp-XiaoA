@@ -141,6 +141,9 @@ static bool UInputCreate() {
         close(fd); return false;
     }
     g_ufd = fd;
+    // 设备刚 CREATE 完，系统 InputReader 还没完成枚举（一般 60~150ms），
+    // 这段时间写进去的 DOWN/MOVE 会被直接丢掉，表现为第一下手感"没反应"。
+    usleep(120 * 1000);
     LOGI("uinput 虚拟触摸设备已创建（%s），范围 %dx%d", ud.name, g_maxX, g_maxY);
     return true;
 }
@@ -153,11 +156,13 @@ static void UInputDestroy() {
     LOGI("uinput 虚拟触摸设备已销毁");
 }
 
+static std::atomic<int> g_emitFail{0};
 static inline void Emit(int type, int code, int val) {
     struct input_event e;
     memset(&e, 0, sizeof(e));
     e.type = (__u16)type; e.code = (__u16)code; e.value = val;
-    if (write(g_ufd, &e, sizeof(e)) < 0) { /* 设备被拔/满了，忽略 */ }
+    if (g_ufd < 0) { ++g_emitFail; return; }
+    if (write(g_ufd, &e, sizeof(e)) < 0) ++g_emitFail;   // 设备被拔/fd 失效，记数给上层判断
 }
 static inline void EmitSyn() { Emit(EV_SYN, SYN_REPORT, 0); }
 
@@ -268,9 +273,12 @@ bool AimTouchUp() {
     if (g_ufd < 0 || !g_aimDown.load()) { pthread_mutex_unlock(&g_uMtx); return false; }
     Emit(EV_ABS, ABS_MT_SLOT, AIM_SLOT);
     Emit(EV_ABS, ABS_MT_TRACKING_ID, -1);
-    // 物理手指还有按住的话不能把 BTN_TOUCH 清掉
+    // 物理手指还有按住的话不能把 BTN_TOUCH 清掉。
+    // 判据必须是【真实按下】(down)；vDown 只是"已重放给 uinput"的状态，
+    // 未抓设备(menuCaptureTouch=0)时恒为 false，用它判会把 BTN_TOUCH 误清成 0。
     bool anyPhys = false;
-    for (int i = 0; i < MAX_SLOTS; ++i) if (i != AIM_SLOT && g_slot[i].vDown) { anyPhys = true; break; }
+    for (int i = 0; i < MAX_SLOTS; ++i)
+        if (i != AIM_SLOT && (g_slot[i].down || g_slot[i].vDown)) { anyPhys = true; break; }
     Emit(EV_KEY, BTN_TOUCH, anyPhys ? 1 : 0);
     EmitSyn();
     g_aimDown = false;
@@ -351,9 +359,9 @@ static bool TakeForUi(float sx, float sy) {
 static void Commit() {
     // 无 TRACKING_ID 的设备用 BTN_TOUCH 推导按下状态
     if (!g_hasTracking) {
-        for (int i = 0; i < MAX_SLOTS; ++i) {
-            g_slot[i].down = (i == 0) && g_btnTouch && g_slot[i].rx >= 0 && g_slot[i].ry >= 0;
-        }
+        // 无 TRACKING_ID 的设备只能靠 BTN_TOUCH 推导：只有 slot0 有意义
+        const bool s0 = g_btnTouch && g_slot[0].rx >= 0 && g_slot[0].ry >= 0;
+        for (int i = 0; i < MAX_SLOTS; ++i) g_slot[i].down = (i == 0) && s0;
     }
     for (int i = 0; i < MAX_SLOTS; ++i) {
         SlotState& s = g_slot[i];

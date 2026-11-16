@@ -64,7 +64,7 @@ od -An -tx1 -N2 -j18 libesp_x86_64.so     # 3e 00 = x86_64
 od -An -tx1 -N2 -j18 libesp_arm64-v8a.so  # b7 00 = aarch64
 ```
 
-`esp_v5.sh status` 子命令已内置这条自检，不匹配直接 WARN。
+`esp.sh status` 子命令已内置这条自检，不匹配直接 WARN。
 
 ---
 
@@ -99,7 +99,7 @@ adb logcat -d -s esp:V | grep '\[shm\] path='
 
 **根因**：JS 写端用 `native.fileUtils.getWritablePath()`，落到 `/data/user/0/<pkg>/files/`；native 读端默认读 `/data/local/tmp/esp_data.bin`（脚本传的路径）。两边不是同一个文件，读端就永远读不到。
 
-**处置**：统一路径。脚本版把 JS 的 `path` 配置改成 `/data/local/tmp/esp_data.bin`，或把读端路径指到 `<writablePath>/esp_data.bin`。`esp_v5.sh status` 会同时打出两边路径，先对一遍。
+**处置**：统一路径。脚本版把 JS 的 `path` 配置改成 `/data/local/tmp/esp_data.bin`，或把读端路径指到 `<writablePath>/esp_data.bin`。`esp.sh status` 会同时打出两边路径，先对一遍。
 
 ---
 
@@ -165,7 +165,7 @@ restorecon -v <path>
 chcon u:object_r:app_data_file:s0 <path>
 ```
 
-`esp_v5.sh` 换 JS 分支已内置这三步 + 备份到 `index.js.bak_pre_v6`；出问题直接 `esp_v5.sh rollback`。
+`esp.sh` 换 JS 分支已内置这三步 + 备份到 `index.js.bak_pre_v6`；出问题直接 `esp.sh rollback`。
 
 ---
 
@@ -175,14 +175,14 @@ chcon u:object_r:app_data_file:s0 <path>
 
 **根因**：重复 `dlopen` / 重复 `pthread_create`。
 
-**处置**：`esp_v5.sh` 注入前先查 `/proc/<pid>/maps`，已映射则跳过。手动注入时也必须自查；库入口 `init` 用 `pthread_once` 兜底。
+**处置**：`esp.sh` 注入前先查 `/proc/<pid>/maps`，已映射则跳过。手动注入时也必须自查；库入口 `init` 用 `pthread_once` 兜底。
 
 ---
 
 ## 14. 一键体检
 
 ```bash
-adb shell su 0 sh /data/local/tmp/imgui/esp_v5.sh status
+adb shell su 0 sh /data/local/tmp/imgui/esp.sh status
 ```
 
 输出应包含：`device abi=`、`so machine=`（两者一致）、游戏 `pid=`、三件套文件存在性与 chmod、`esp_data.bin` 大小与 mtime。

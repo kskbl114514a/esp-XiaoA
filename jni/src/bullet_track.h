@@ -19,6 +19,7 @@ struct Hit {
     Vec2   sNow;               // 目标当前屏幕坐标
     bool   onScreen   = false;
     bool   inFov      = true;
+    bool   useMatrix  = true;   // 本次解算是否走矩阵（false=JS 已给屏幕坐标，弹道弧无法画）
 };
 
 // 每帧：选目标 → 解算弹道 → 填 g_hit（不产生任何输入事件）

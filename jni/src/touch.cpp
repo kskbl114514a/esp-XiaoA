@@ -23,6 +23,10 @@ static FnAction origDown = nullptr, origMove = nullptr, origUp = nullptr, origCa
 static std::atomic<bool> g_installed{false};
 static std::atomic<bool> g_fireHeld{false};
 static std::atomic<bool> g_consuming{false};
+// 被菜单吃掉的是【哪一根】手指。单 bool 在多点下会错乱：
+// 第二根手指按下(A) → 第一根抬起，g_consuming 已被 A 覆盖，UP 走错分支，
+// 结果游戏侧收到"没有 DOWN 的 UP"或者手指卡住不放。
+static std::atomic<int>  g_consumeId{-1};
 
 static std::atomic<float> g_mx{0}, g_my{0};
 static std::atomic<int>   g_sw{1080}, g_sh{2400};
@@ -105,6 +109,7 @@ static void Down(JNIEnv* env, jclass c, jint id, jfloat x, jfloat y) {
     }
     if (ShouldConsume(x, y)) {
         g_consuming = true;
+        g_consumeId = id;
         FeedImGui(0, x, y);
         return;
     }
@@ -114,7 +119,9 @@ static void Down(JNIEnv* env, jclass c, jint id, jfloat x, jfloat y) {
 
 static void Move(JNIEnv* env, jclass c, jint id, jfloat x, jfloat y) {
     g_mx = x; g_my = y;
-    if (g_consuming.load() || ShouldConsume(x, y)) {
+    // 只喂"当初按下就被吞掉的那根手指"：否则别的指头从菜单外滑进来，
+    // 会凭空给 ImGui 一串没有 DOWN 的 MOVE，同时把游戏侧正常拖动吃掉。
+    if (g_consuming.load() && id == g_consumeId.load()) {
         FeedImGui(2, x, y);
         return;
     }
@@ -123,9 +130,10 @@ static void Move(JNIEnv* env, jclass c, jint id, jfloat x, jfloat y) {
 
 static void Up(JNIEnv* env, jclass c, jint id, jfloat x, jfloat y) {
     g_fireHeld = false;
-    if (g_consuming.load()) {
+    if (g_consuming.load() && id == g_consumeId.load()) {
         FeedImGui(1, x, y);
         g_consuming = false;
+        g_consumeId = -1;
         return;
     }
     if (origUp) origUp(env, c, id, x, y);
@@ -133,9 +141,10 @@ static void Up(JNIEnv* env, jclass c, jint id, jfloat x, jfloat y) {
 
 static void Cancel(JNIEnv* env, jclass c, jint id, jfloat x, jfloat y) {
     g_fireHeld = false;
-    if (g_consuming.load()) {
+    if (g_consuming.load() && id == g_consumeId.load()) {
         FeedImGui(3, x, y);
         g_consuming = false;
+        g_consumeId = -1;
         return;
     }
     if (origCancel) origCancel(env, c, id, x, y);

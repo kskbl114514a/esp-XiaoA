@@ -1,6 +1,7 @@
 // touchaim.h —— 触摸自瞄：选目标 + 闭环拖动投递
 #pragma once
 #include "sensor.h"
+#include <vector>
 
 namespace TouchAim {
 

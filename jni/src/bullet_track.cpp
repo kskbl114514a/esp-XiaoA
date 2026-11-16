@@ -13,14 +13,23 @@ namespace Track {
 static Hit   g_hit;
 static int   g_cand = 0;
 static float g_ms   = 0.f;
-static bool  g_useMatrix = true;   // v4：本次解算是否走矩阵（false=JS 已给屏幕坐标，弧线不画）
+static bool  g_useMatrix = true;   // 兼容旧符号保留；实际判定改用 Hit::useMatrix
+static int   g_fallbackPts = 0;    // 头/胸世界点无效、改由脚点推算的次数（排查用）
 
 static inline float Dist3(const Vec3& a, const Vec3& b) {
     const float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
     return sqrtf(dx * dx + dy * dy + dz * dz);
 }
+// 世界坐标是否有效（Cocos 里未挂载的节点会给 (0,0,0)，但真实原点周围 1cm 内也当无效）
+static inline bool Zero3(const Vec3& v) {
+    return fabsf(v.x) < 1e-4f && fabsf(v.y) < 1e-4f && fabsf(v.z) < 1e-4f;
+}
+// JS 写入端的归一化屏幕坐标是否可用：必须落在 [0,1]（越界 0 值不能再当成"可见"）
+static inline bool ScrValid01(float r) {
+    return r > -0.05f && r < 1.05f;
+}
 
-void Reset() { g_hit = Hit(); g_cand = 0; g_ms = 0.f; }
+void Reset() { g_hit = Hit(); g_cand = 0; g_ms = 0.f; g_fallbackPts = 0; }
 
 // 弹道解算：以固定点迭代收敛飞行时间，同时算提前量与下坠
 static void Solve(const Vec3& cam, const Vec3& target, const Vec3& vel, Hit& out) {
@@ -71,23 +80,39 @@ void Update(const ViewInfo& v, std::vector<Entity>& ents, float dt) {
     for (size_t i = 0; i < ents.size(); ++i) {
         Entity& e = ents[i];
         if (e.isDead) continue;
+        if (e.isKnocked) continue;                       // 倒地不追（hp 已为 0，靠这个兜住）
+        if (g_cfg.btIgnoreTeam && e.isTeam) continue;     // 队友不追（原实现完全没有队伍概念）
         if (e.distance > g_cfg.btMaxDist) continue;
 
+        // 锁头红线：头点无效时用 feet + 身高**推算头**，绝不悄悄退化成锁胸。
+        // 原写法 `tgt = e.chest` 直接让"必须锁头"变成"锁胸"，是实打实的功能性 bug。
         Vec3 tgt = (g_cfg.btBone == 1) ? e.chest : e.head;
-        if (!e.screenSpace) {
-            if (tgt.x == 0.f && tgt.y == 0.f && tgt.z == 0.f) tgt = e.chest;
-            if (tgt.x == 0.f && tgt.y == 0.f && tgt.z == 0.f) continue;
+        if (Zero3(tgt)) {
+            const float hUp = (g_cfg.btBone == 1) ? 1.25f : 1.72f;   // 胸/头相对脚点高度
+            if (Zero3(e.chest) && Zero3(e.feet)) continue;
+            if (!Zero3(e.feet))
+                tgt = Vec3(e.feet.x, e.feet.y + hUp, e.feet.z);
+            else
+                tgt = e.chest;
+            if (Zero3(tgt)) continue;
+            ++g_fallbackPts;
         }
 
         Vec2 now2;
         bool haveNow = false;
         if (e.screenSpace) {
-            // v4：屏幕坐标由 JS 侧归一化给出，不需要矩阵
-            now2.x = ((g_cfg.btBone == 1) ? e.screenChestX : e.screenHeadX) * sw;
-            now2.y = ((g_cfg.btBone == 1) ? e.screenChestY : e.screenHeadY) * sh;
-            haveNow = true;
-        } else if (W2S(v.viewProj, tgt, now2, sw, sh)) {
-            haveNow = true;
+            // 屏幕坐标由 JS 侧归一化给出；未写入(全 0)/越界的一律视为无效，
+            // 否则 (0,0) 会被当成左上角真实目标参与选优。
+            const float nx = ((g_cfg.btBone == 1) ? e.screenChestX : e.screenHeadX);
+            const float ny = ((g_cfg.btBone == 1) ? e.screenChestY : e.screenHeadY);
+            if (ScrValid01(nx) && ScrValid01(ny)) {
+                now2.x = nx * sw;
+                now2.y = ny * sh;
+                haveNow = true;
+            }
+        }
+        if (!haveNow && v.hasProj && W2S(v.viewProj, tgt, now2, sw, sh)) {
+            haveNow = true;      // JS 屏幕坐标缺失时，有矩阵就自己投影兜底
         }
         if (!haveNow) continue;
 
@@ -100,25 +125,28 @@ void Update(const ViewInfo& v, std::vector<Entity>& ents, float dt) {
         Hit h;
         h.entIndex = (int)i;
         h.sNow     = now2;
-        if (e.screenSpace && e.hasLead) {
+        if (e.screenSpace && e.hasLead && ScrValid01(e.leadScrX) && ScrValid01(e.leadScrY)) {
             // JS 已解算提前量/下坠/命中点屏幕坐标 → 直接采用，零矩阵依赖
             h.leadMeters = e.leadMeters;
             h.dropMeters = e.dropMeters;
             h.flightTime = e.flightTime;
-            h.dist       = e.distance;
+            // 距离语义统一成「相机 → 命中点」，别再用 feet 距离，
+            // 否则有些实体走 JS 分支、有些走自解算分支，信息文本数字会来回跳。
+            h.dist       = Dist3(v.camPos, tgt);
             h.point      = tgt;
             h.sPoint.x   = e.leadScrX * sw;
             h.sPoint.y   = e.leadScrY * sh;
-            h.onScreen   = (e.leadScrX > 0.f || e.leadScrY > 0.f);
+            h.onScreen   = true;     // 已通过 [0,1] 校验，就是可见
             h.inFov      = true;
             h.valid      = true;
-            g_useMatrix  = false;
+            h.useMatrix  = false;
         } else {
             Solve(v.camPos, tgt, e.velocity, h);
-            h.onScreen = W2S(v.viewProj, h.point, h.sPoint, sw, sh);
+            h.onScreen = v.hasProj ? W2S(v.viewProj, h.point, h.sPoint, sw, sh) : false;
+            if (!h.onScreen) h.sPoint = now2;   // 无矩阵时退化到目标当前点，至少能画连线
             h.inFov    = true;
             h.valid    = true;
-            g_useMatrix = true;
+            h.useMatrix = true;
         }
 
         best  = h;
@@ -132,7 +160,14 @@ void Update(const ViewInfo& v, std::vector<Entity>& ents, float dt) {
 }
 
 void Draw(ImDrawList* dl, const ViewInfo& v) {
-    if (!dl || !g_cfg.btEnabled || !g_hit.valid || !g_hit.onScreen || !v.valid) return;
+    // 原实现要求 onScreen 才画任何东西：预测点刚出屏时整块信息（含距离/提前量）直接消失。
+    // 现在只要求解算有效，屏外元素按坐标自行裁剪。
+    if (!dl || !g_cfg.btEnabled || !g_hit.valid || !v.valid) return;
+    const float sw = (float)(v.viewW > 0 ? v.viewW : 1920);
+    const float sh = (float)(v.viewH > 0 ? v.viewH : 1080);
+    const bool inView = g_hit.sPoint.x > -sw && g_hit.sPoint.x < sw * 2.f &&
+                        g_hit.sPoint.y > -sh && g_hit.sPoint.y < sh * 2.f;
+    if (!inView) return;
 
     const float s     = Render::UiScale();
     const ImU32 colP  = IM_COL32(255, 90, 90, 235);
@@ -158,7 +193,7 @@ void Draw(ImDrawList* dl, const ViewInfo& v) {
 
     // 弹道弧：从枪口（≈相机）到命中点，按飞行时间采样物理抛物线后投影
     // v4：JS 已给屏幕坐标时没有可靠矩阵，弧线跳过（点/信息仍然画）
-    if (g_cfg.btShowArc && g_hit.flightTime > 0.001f && g_useMatrix) {
+    if (g_cfg.btShowArc && g_hit.flightTime > 0.001f && g_hit.useMatrix && v.hasProj) {
         const Vec3 A = v.camPos;
         const Vec3 Bn(g_hit.point.x, g_hit.point.y + g_hit.dropMeters, g_hit.point.z);
         const float g = g_cfg.btUseGravity ? g_cfg.btGravity : 0.f;

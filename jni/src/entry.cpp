@@ -9,6 +9,7 @@
 #include "bullet_track.h"
 #include "touch.h"
 #include "evtouch.h"
+#include "touchaim.h"
 #include "java_bridge.h"
 
 #include <EGL/egl.h>
@@ -84,8 +85,10 @@ static void DrawOneFrame(int w, int h) {
     ents.clear();
     bool haveData = false;
     if (sensor) haveData = sensor->Update(view, ents);
-    if (!view.valid) { view.viewW = w; view.viewH = h; }
-    if (view.viewW <= 0 || view.viewW != w) { view.viewW = w; view.viewH = h; }
+    // 屏幕尺寸统一以 eglQuerySurface 拿到的真实 surface 为准：
+    // 数据源报的 viewW/viewH 可能是游戏内部设计分辨率（模拟器缩放时与 surface 不一致），
+    // 一旦不一致，所有屏幕坐标都会系统性偏移。
+    if (w > 0 && h > 0) { view.viewW = w; view.viewH = h; }
     // 场景 dump 限频：原来每帧都 dump，120Hz 下等于每秒 120 条 logcat，纯拖帧
     if (sensor && g_cfg.sensorDumpScene) {
         static double s_lastDump = -1e9;
@@ -97,7 +100,9 @@ static void DrawOneFrame(int w, int h) {
     // 子弹追踪：每帧先解算再绘制，纯可视化，不产生任何输入事件
     Track::Update(view, ents, dt);
     Track::Draw(fg, view);
-    // 触摸自瞄：选目标 + 往 /dev/uinput 独立 slot 虚拟手指投递拖动
+    // 触摸自瞄：选目标 + 往 /dev/uinput 独立 slot 虚拟手指投递拖动。
+    // 放在 Menu::Draw 之前：菜单展开时 TouchAim::Update 内部会先松手指，避免和点菜单抢触摸。
+    TouchAim::Update(view, ents, dt);
     Menu::Draw(w, h);
     Esp::DrawWatermark(fg, (float)w, (float)h, (int)ents.size(),
                        sensor ? sensor->Name() : "鏃", dt * 1000.f);
@@ -270,6 +275,7 @@ __attribute__((destructor))
 static void OnUnload() {
     LOGI("esp.so 鍗歌浇锛屽洖鏀?hook");
     g_running = false;
+    TouchAim::Reset();          // 卸载前必须先把虚拟手指抬起来，否则会留一根"永远按着"的手指
     TouchHook::Uninstall();
     EvdevTouch::Stop();
     Render::Shutdown();

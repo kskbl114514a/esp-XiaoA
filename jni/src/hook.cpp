@@ -57,7 +57,6 @@ static bool FindModule(const char* soname, ModInfo& out) {
                 uintptr_t e = s + ph.p_memsz;
                 if (s < d->second->first)  d->second->first = s;
                 if (e > d->second->second) d->second->second = e;
-                d->second->first  = d->second->first;
             }
         }
         return 0;

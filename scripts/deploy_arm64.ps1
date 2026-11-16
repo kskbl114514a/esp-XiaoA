@@ -29,14 +29,14 @@ $abi = (A @("shell","getprop","ro.product.cpu.abi")).Trim()
 $enforce = (A @("shell","getenforce")).Trim()
 $rootId = (A @("shell","su","-c","id -u")).Trim()
 Write-Host "[deploy] device abi=$abi  selinux=$enforce  su-id=$rootId" -ForegroundColor Cyan
-if ($abi -notmatch "arm64") { throw "设备 abi=$abi，不是 arm64；模拟器请走 esp_v5.sh 流程" }
+if ($abi -notmatch "arm64") { throw "设备 abi=$abi，不是 arm64；模拟器请走 scripts/esp.sh 流程" }
 if ($rootId -ne "0") { throw "su 未拿到 root（返回 '$rootId'），检查 KernelSU 是否已授权该 shell" }
 
 # ---- 1. 本地产物校验 ----
 $files = @(
   @{ host = Join-Path $repo "prebuilt\arm64\inj_a64";               dev = "$D/inj_a64";        mode = "755"; mach = "b700"; md5 = "c109c3460b2fa62750035d7994b92d0a" },
   @{ host = Join-Path $repo "prebuilt\libesp_arm64-v8a.so";         dev = "$D/libesp_arm64.so";mode = "644"; mach = "b700"; md5 = "49ecf9939e375c90bb970ac479d8a017" },
-  @{ host = Join-Path $repo "scripts\esp_a64.sh";                   dev = "$D/esp_a64.sh";     mode = "755"; mach = "";     md5 = "" },
+  @{ host = Join-Path $repo "scripts\esp.sh";                   dev = "$D/esp.sh";     mode = "755"; mach = "";     md5 = "" },
   @{ host = Join-Path $repo "js\esp_shm_block.js";                  dev = "$D/index_v6.js";    mode = "644"; mach = "";     md5 = "" }
 )
 foreach ($f in $files) {
@@ -68,14 +68,14 @@ $ls | ForEach-Object { "  $_" }
 # ---- 4. 可选执行 ----
 if ($Run) {
   if ($Run -eq "all") { $dev = "all nojs" } else { $dev = $Run }
-  Write-Host "[deploy] 执行: sh $D/esp_a64.sh $dev" -ForegroundColor Yellow
-  A @("shell","su","-c","sh $D/esp_a64.sh $dev") | ForEach-Object { "  $_" }
+  Write-Host "[deploy] 执行: sh $D/esp.sh $dev" -ForegroundColor Yellow
+  A @("shell","su","-c","sh $D/esp.sh $dev") | ForEach-Object { "  $_" }
 } else {
   Write-Host ""
   Write-Host "下一步（按顺序）:" -ForegroundColor Green
-  Write-Host "  1) su -c `"sh $D/esp_a64.sh all nojs`"      # 换JS(可选)+冷启动游戏"
+  Write-Host "  1) su -c `"sh $D/esp.sh all nojs`"      # 换JS(可选)+冷启动游戏"
   Write-Host "  2) 手动进训练场/对局（大厅里 Camera=0 注不进去层）"
-  Write-Host "  3) su -c `"sh $D/esp_a64.sh inject`"        # 注入，验收 maps=3"
-  Write-Host "  4) su -c `"sh $D/esp_a64.sh verify`"        # 体检"
+  Write-Host "  3) su -c `"sh $D/esp.sh inject`"        # 注入，验收 maps=3"
+  Write-Host "  4) su -c `"sh $D/esp.sh verify`"        # 体检"
   Write-Host "  或直接 -Run all 走 auto（等同 all，需手动进对局后再 inject）"
 }

@@ -50,8 +50,8 @@ static bool QueryGLVersion() {
     const char* ver = (const char*)glGetString(GL_VERSION);
     if (!ver) return false;
     LOGI("GL_VERSION=%s", ver);
-    if (strstr(ver, "OpenGL ES 3")) { strcpy(g_glsl, "#version 300 es"); return true; }
-    strcpy(g_glsl, "#version 100");
+    if (strstr(ver, "OpenGL ES 3")) { snprintf(g_glsl, sizeof(g_glsl), "%s", "#version 300 es"); return true; }
+    snprintf(g_glsl, sizeof(g_glsl), "%s", "#version 100");
     return true;
 }
 
@@ -134,11 +134,21 @@ float UiScale() {
     return s < 0.4f ? 0.4f : s;
 }
 
+static std::atomic<int> g_evDrop{0};   // 被丢弃的普通事件数（诊断用）
 void PushTouch(const TouchEvent& ev) { InjectRawTouch(0, ev.action, ev.x, ev.y); }
 
 void InjectRawTouch(int pointerId, int action, float x, float y) {
     std::lock_guard<std::mutex> lk(g_evMtx);
-    if (g_events.size() < 128) g_events.push_back({pointerId, action, x, y});
+    if (g_events.size() >= 128) {
+        // 满了不能无脑丢：抬手/取消一旦被丢，ImGui 会永久停在按下状态
+        // （滑块粘手、按钮常亮、后面所有点击都错位）。
+        const bool critical = (action == 1 || action == 3);
+        if (!critical) { ++g_evDrop; return; }              // 普通 MOVE 丢了无所谓
+        for (auto it = g_events.begin(); it != g_events.end(); ++it) {
+            if (it->action == 2) { g_events.erase(it); break; }   // 腾掉一条 MOVE 保 UP
+            }
+    }
+    g_events.push_back({pointerId, action, x, y});
 }
 
 static double NowSec() {

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-v6 patch: base = index_v3.js (clean baseline, 已含锁血v2 + 子弹追踪 hooks)
-输出 = index_v6.js
+v7 patch: base = index_v3.js (clean baseline, 已含锁血v2 + 子弹追踪 hooks)
+输出 = index_v7.js
 
 本次改动（全部为「面板直读倍率」语义，1:1 对应需求数值）：
   1) 移速  mul:3   —— 去掉旧公式里无依据的 3 常量，speedScale *= mul  => 3 倍
@@ -16,8 +16,12 @@ import os, re, hashlib, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BASE = os.path.join(HERE, "index_v3.js")
+# 写入块只有一份事实源：仓库根的 js/esp_shm_block.js。
+# 早期脚本默认取 HERE/esp_shm_block.js，但仓库里没有这个文件，直接跑必 FileNotFoundError。
 BLOCK = os.path.join(HERE, "esp_shm_block.js")
-OUT = os.path.join(HERE, "index_v6.js")
+if not os.path.exists(BLOCK):
+    BLOCK = os.path.abspath(os.path.join(HERE, "..", "js", "esp_shm_block.js"))
+OUT = os.path.join(HERE, "index_v7.js")
 
 MARK = "/*ESPSHM_V5_BEGIN*/"
 ENDMARK = "/*ESPSHM_V5_END*/"
@@ -62,6 +66,9 @@ def sub1(s, old, new, tag):
 
 
 def main():
+    for _p, _n in ((BASE, "基线 index_v3.js"), (BLOCK, "写入块 esp_shm_block.js")):
+        if not os.path.exists(_p):
+            sys.exit("缺少%s：%s" % (_n, _p))
     s = open(BASE, encoding="utf-8", errors="replace", newline="").read()
     block = open(BLOCK, encoding="utf-8").read()
     n0 = len(s)
@@ -125,6 +132,8 @@ def main():
         "espshm w_camp": "dv.setInt32(base+O_CAMP",
         "espshm w_ai": "dv.setInt32(base+O_AI",
         "espshm w_live": "dv.setInt32(base+O_LS",
+        "wbin data-first": "fu.writeDataToFile(buf,path)",
+        "wbin verify": "ioSz!==HDR_SZ",
         "espshm rawcamp": "rawCamp:(d.camp!==void 0",
         "espshm passthru": "onlyReal:!1",
     }

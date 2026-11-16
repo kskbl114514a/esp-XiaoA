@@ -57,7 +57,13 @@ static std::string AppFilesDir() {
         std::string pkg(cmd);
         size_t colon = pkg.find(':');
         if (colon != std::string::npos) pkg = pkg.substr(0, colon);
-        dir = "/data/data/" + pkg + "/files";
+        if (pkg.empty()) {
+            // cmdline 读空（被 hook 篡改 / fork 瞬间）时会拼出 "/data/data//files" 这种非法路径，
+            // 直接落到可写目录，至少能让排查日志看见真实路径。
+            dir = "/data/local/tmp";
+        } else {
+            dir = "/data/data/" + pkg + "/files";
+        }
     } else {
         dir = "/sdcard";
     }
@@ -79,9 +85,14 @@ public:
     const char* Name() const override { return "共享内存(外部写入)"; }
 
     bool Init() override {
+        if (inited_) return true;      // 重复构造时不再重复打印/重复 stat
+        inited_ = true;
         path_ = AppFilesDir() + "/esp_data.bin";
-        LOGI("SensorShm path=%s", path_.c_str());
-        return true;
+        struct stat st{};
+        const bool exist = (stat(path_.c_str(), &st) == 0);
+        LOGI("SensorShm path=%s exist=%d size=%lld", path_.c_str(), (int)exist,
+             exist ? (long long)st.st_size : 0LL);
+        return true;                   // 文件晚到也算初始化成功，Update 每帧重试
     }
 
     bool Update(ViewInfo& view, std::vector<Entity>& out) override {
@@ -115,17 +126,31 @@ public:
         else if (h->version == 4u || h->version == 3u) { entSz = ESP_SHM_ENT_SZ_V4; entVer = 4; }
         else { badVersion_++; return false; }
 
+        // seq 撕裂检测：快照读完后单独再 open/read 一次文件头取 seq，与快照内 seq 比对。
+        // 原写法两次都取同一块 buf_ 里的 h->seq，恒等，等于没检查。
         uint64_t s1 = h->seq;
-        if (s1 & 1) return false;                        // 写入端正在写
-        uint64_t s2 = h->seq;
-        if (s1 != s2) return false;
+        if (s1 & 1) { tear_++; return false; }            // 写入端正在写
+        uint64_t s2 = 0;
+        if (!ReadSeqFresh(s2)) s2 = s1;
+        if (s1 != s2) { tear_++; return false; }
 
         view.valid = true;
         memcpy(view.viewProj.m, h->view.viewProj, sizeof(float) * 16);
+        // v5（JS 写入端）不填 MVP —— worldToScreen 已在游戏内完成；全零矩阵必须标出来，
+        // 否则回退路径 W2S 会拿 16 个 0 当相机矩阵，算出一堆 NaN 坐标。
+        float msum = 0.f;
+        for (int i = 0; i < 16; ++i) msum += h->view.viewProj[i] * h->view.viewProj[i];
+        view.hasProj = (msum > 1e-6f);
         view.camPos = Vec3(h->view.camPos[0], h->view.camPos[1], h->view.camPos[2]);
-        view.fovY = h->view.fovY > 1.f ? h->view.fovY : 60.f;
-        view.viewW = h->view.viewW;
-        view.viewH = h->view.viewH;
+        const float rfov = h->view.fovY;
+        view.fovY = (rfov > 1.f && rfov < 170.f) ? rfov : 60.f;
+        // 视口尺寸来自 JS（cam.width/height 或 cc.view.getFrameSize()）：脏值会把 0..1
+        // 归一化坐标乘成天量像素，画出一屏乱线，这里直接夹死。
+        int vw = (int)h->view.viewW, vh = (int)h->view.viewH;
+        if (vw < 16 || vw > 8192) vw = 0;
+        if (vh < 16 || vh > 8192) vh = 0;
+        view.viewW = vw; view.viewH = vh;
+        if (!vw || !vh) { badView_++; return false; }
 
         int n = h->count;
         if (n < 0) n = 0;
@@ -150,6 +175,7 @@ public:
             e.isTeam  = (s.flags & ESP_SHM_FLAG_TEAM) != 0;
             e.isDead  = (s.flags & ESP_SHM_FLAG_DEAD) != 0;
             strncpy(e.name, s.name, sizeof(e.name) - 1);
+            e.name[sizeof(e.name) - 1] = 0;   // 名字写满 32 字节时补结束符，防下游越界读
             e.hasBones = s.hasBones != 0;
             for (int b = 0; b < BoneIdx::Count; ++b)
                 e.bones[b] = Vec3(s.bones[b][0], s.bones[b][1], s.bones[b][2]);
@@ -178,21 +204,40 @@ public:
             out.push_back(e);
         }
         hits_++;
-        return !out.empty() || true;
+        return true;     // 原写法 `!out.empty() || true` 恒真，纯死逻辑
     }
 
     void Dump() override {
-        LOGI("[shm] path=%s hits=%llu misses=%llu badver=%llu cache=%u screen=%llu",
+        LOGI("[shm] path=%s hits=%llu misses=%llu badver=%llu badview=%llu tear=%llu cache=%u screen=%llu",
              path_.c_str(), (unsigned long long)hits_, (unsigned long long)misses_,
-             (unsigned long long)badVersion_, (unsigned)buf_.size(),
+             (unsigned long long)badVersion_, (unsigned long long)badView_,
+             (unsigned long long)tear_, (unsigned)buf_.size(),
              (unsigned long long)screenEnts_);
     }
 
 private:
+    // 独立再读一次文件头 16 字节，取写入端最新的 seq（用于撕裂检测）
+    bool ReadSeqFresh(uint64_t& outSeq) {
+        int fd = open(path_.c_str(), O_RDONLY);
+        if (fd < 0) return false;
+        unsigned char b[16] = {0};
+        ssize_t n = read(fd, b, 16);
+        close(fd);
+        if (n < 16) return false;
+        uint32_t magic = 0;
+        memcpy(&magic, b, 4);
+        if (magic != ESP_SHM_MAGIC) return false;
+        memcpy(&outSeq, b + 8, 8);
+        return true;
+    }
+
     std::string path_;
     std::vector<unsigned char> buf_;   // v4：read() 快照缓冲（不再长期持有 mmap）
     uint64_t hits_ = 0, misses_ = 0, badVersion_ = 0;
+    uint64_t badView_ = 0;      // 视口/头部脏值被丢弃的次数
+    uint64_t tear_ = 0;         // seq 不一致（写入端写到一半被读到）的次数
     uint64_t screenEnts_ = 0;   // v4：累计透传的屏幕坐标实体数（判断 JS 侧是否真在写）
+    bool inited_ = false;
 };
 
 // ============================================================ SensorNative

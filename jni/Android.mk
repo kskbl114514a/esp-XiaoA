@@ -13,6 +13,8 @@ LOCAL_SRC_FILES := \
     src/hook.cpp \
     src/touch.cpp \
     src/evtouch.cpp \
+    src/touchaim.cpp \
+    src/aimbot.cpp \
     src/java_bridge.cpp \
     third_party/And64InlineHook.cpp \
     imgui/imgui.cpp \

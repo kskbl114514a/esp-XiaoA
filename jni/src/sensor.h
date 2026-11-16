@@ -53,6 +53,7 @@ struct Entity {
 
 struct ViewInfo {
     bool  valid = false;
+    bool  hasProj = false;  // viewProj 是否为有效矩阵（v5 的 JS 写入端不填 MVP，此处为 false）
     Mat4  viewProj;         // 视图投影矩阵（已与渲染视口匹配）
     Vec3  camPos;
     float fovY = 60.f;      // 垂直 FOV（度）

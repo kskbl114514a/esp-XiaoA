@@ -2,6 +2,7 @@
 // 说明：自瞄不走「改相机 yaw/pitch」（那样需要标定 Camera 结构，且很多游戏的相机每帧被逻辑重写），
 // 走「注入触摸拖动」：游戏把手指滑动映射成视角旋转，注入等同真实手指，版本无关、通用。
 #include "java_bridge.h"
+#include <pthread.h>
 #include "log.h"
 #include "config.h"
 #include "vecmath.h"
@@ -50,11 +51,25 @@ static void SetErr(const char* what) {
 
 const char* LastError() { return g_err; }
 
+// 附着到 VM 的线程必须在退出前 DetachCurrentThread，否则 VM 认为线程仍存在，
+// 反复 hook 卸载/重载会堆积 JNI 附着（日志刷 "thread not detached"，极端情况 abort）。
+// 这里用 pthread_key 的析构函数兜底：谁 Attach 的，线程一退出就自动 Detach。
+static pthread_key_t  g_tlKey;
+static pthread_once_t g_tlOnce = PTHREAD_ONCE_INIT;
+static void TlDetach(void*) {
+    if (!g_vm) return;
+    JNIEnv* e = nullptr;
+    if (g_vm->GetEnv((void**)&e, JNI_VERSION_1_6) == JNI_OK) g_vm->DetachCurrentThread();
+}
+static void TlInit() { pthread_key_create(&g_tlKey, TlDetach); }
+
 static JNIEnv* Env() {
     if (!g_vm) return nullptr;
     JNIEnv* env = nullptr;
     if (g_vm->GetEnv((void**)&env, JNI_VERSION_1_6) != JNI_OK) {
         if (g_vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return nullptr;
+        pthread_once(&g_tlOnce, TlInit);
+        pthread_setspecific(g_tlKey, (void*)1);   // 绑定析构，线程退出自动 Detach
     }
     return env;
 }
@@ -75,7 +90,6 @@ static jobject FindCurrentActivity(JNIEnv* env) {
     jclass mapCls = env->GetObjectClass(map);
     jmethodID sizeM = env->GetMethodID(mapCls, "size", "()I");
     jmethodID valueAt = env->GetMethodID(mapCls, "valueAt", "(I)Ljava/lang/Object;");
-    jmethodID keyAt = env->GetMethodID(mapCls, "keyAt", "(I)Ljava/lang/Object;");
     jobject result = nullptr;
     if (sizeM && valueAt) {
         jint n = env->CallIntMethod(map, sizeM);
@@ -91,7 +105,6 @@ static jobject FindCurrentActivity(JNIEnv* env) {
                     jfieldID fPaused = env->GetFieldID(recCls, "paused", "Z");
                     bool paused = false;
                     if (fPaused) paused = env->GetBooleanField(rec, fPaused) == JNI_TRUE;
-                    (void)keyAt;
                     if (!paused) result = act;
                     else env->DeleteLocalRef(act);
                 }
@@ -126,21 +139,47 @@ bool Init(JNIEnv* env, jobject ctx) {
 
     jclass actCls = env->GetObjectClass(act);
     g_dispatch = env->GetMethodID(actCls, "dispatchTouchEvent", "(Landroid/view/MotionEvent;)Z");
-    if (!g_dispatch) { env->ExceptionClear(); SetErr("找不到 dispatchTouchEvent"); return false; }
+    if (!g_dispatch) {
+        env->ExceptionClear(); SetErr("找不到 dispatchTouchEvent");
+        env->DeleteLocalRef(actCls); env->DeleteLocalRef(act);   // 失败路径也要还局部引用
+        return false;
+    }
 
     jclass meCls = env->FindClass("android/view/MotionEvent");
-    if (!meCls) { env->ExceptionClear(); SetErr("找不到 MotionEvent"); return false; }
+    if (!meCls) {
+        env->ExceptionClear(); SetErr("找不到 MotionEvent");
+        env->DeleteLocalRef(actCls); env->DeleteLocalRef(act);
+        return false;
+    }
     g_obtain = env->GetStaticMethodID(meCls, "obtain",
         "(JJIFFI)Landroid/view/MotionEvent;");
-    if (!g_obtain) { env->ExceptionClear(); SetErr("找不到 MotionEvent.obtain"); return false; }
+    if (!g_obtain) {
+        env->ExceptionClear(); SetErr("找不到 MotionEvent.obtain");
+        env->DeleteLocalRef(meCls); env->DeleteLocalRef(actCls); env->DeleteLocalRef(act);
+        return false;
+    }
     g_recycle = env->GetMethodID(meCls, "recycle", "()V");
     g_setSource = env->GetMethodID(meCls, "setSource", "(I)V");
 
     // ---- 多点注入通道：自定义 pointerId，避免与玩家真实手指（id 0）抢同一条 pointer
     // 这条路径能用时，自瞄手指与开火手指可同时存在，不会互相打断。
     do {
-        g_ppCls = env->FindClass("android/view/MotionEvent$PointerProperties");
-        g_pcCls = env->FindClass("android/view/MotionEvent$PointerCoords");
+        // 原来直接把 FindClass 的返回值存进成员：jclass 是【局部引用】，
+        // 出了 Init 就失效，之后在别的线程/别的帧用 g_ppCls 去 GetFieldID 属于
+        // 使用悬垂 JNI 引用（未定义行为，实测表现为注入线程偶发崩在 Obtain）。
+        // 必须 NewGlobalRef 提升为全局引用。
+        jclass ppLocal = env->FindClass("android/view/MotionEvent$PointerProperties");
+        jclass pcLocal = env->FindClass("android/view/MotionEvent$PointerCoords");
+        if (!ppLocal || !pcLocal) {
+            env->ExceptionClear();
+            if (ppLocal) env->DeleteLocalRef(ppLocal);
+            if (pcLocal) env->DeleteLocalRef(pcLocal);
+            break;
+        }
+        g_ppCls = (jclass)env->NewGlobalRef(ppLocal);
+        g_pcCls = (jclass)env->NewGlobalRef(pcLocal);
+        env->DeleteLocalRef(ppLocal);
+        env->DeleteLocalRef(pcLocal);
         if (!g_ppCls || !g_pcCls) { env->ExceptionClear(); break; }
 
         jmethodID ppInit = env->GetMethodID(g_ppCls, "<init>", "()V");
@@ -159,7 +198,12 @@ bool Init(JNIEnv* env, jobject ctx) {
         }
         jobject pp = env->NewObject(g_ppCls, ppInit);
         jobject pc = env->NewObject(g_pcCls, pcInit);
-        if (!pp || !pc) { env->ExceptionClear(); break; }
+        if (!pp || !pc) {
+            env->ExceptionClear();
+            if (pp) env->DeleteLocalRef(pp);
+            if (pc) env->DeleteLocalRef(pc);
+            break;
+        }
         g_pp = env->NewGlobalRef(pp);
         g_pc = env->NewGlobalRef(pc);
         env->DeleteLocalRef(pp);
@@ -220,18 +264,27 @@ static jobject Obtain(JNIEnv* env, int action, float x, float y) {
     return o;
 }
 
-static void Dispatch(int action, float x, float y) {
+// 返回是否真的把事件塞进了 Activity：原来 void，调用方无法感知失败，
+// 会在"事件其实没进去"的情况下继续推进内部坐标，越推越偏。
+static bool Dispatch(int action, float x, float y) {
     JNIEnv* env = Env();
-    if (!env || !g_activity) { SetErr("触摸注入未初始化"); return; }
+    if (!env || !g_activity) { SetErr("触摸注入未初始化"); return false; }
     jobject ev = Obtain(env, action, x, y);
-    if (!ev) { SetErr("MotionEvent.obtain 失败"); return; }
-    env->CallBooleanMethod(g_activity, g_dispatch, ev);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); SetErr("dispatchTouchEvent 抛异常"); }
+    if (!ev) { SetErr("MotionEvent.obtain 失败"); return false; }
+    jboolean consumed = env->CallBooleanMethod(g_activity, g_dispatch, ev);
+    bool ok = true;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); SetErr("dispatchTouchEvent 抛异常"); ok = false; }
+    (void)consumed;   // 返回 false 说明 Activity 没消费，但事件已送达，仍算投递成功
     if (g_recycle) env->CallVoidMethod(ev, g_recycle);
     env->DeleteLocalRef(ev);
+    return ok;
 }
 
 bool Dragging() { return g_dragging; }
+
+// 菜单拖动标记：菜单 BeginDrag 与自瞄 Nudge 共用同一根虚拟手指（g_px/g_py/g_dragging），
+// 不隔离的话菜单一拖，自瞄每帧把坐标改回去，表现为菜单飘/自瞄抽搐。
+static bool g_uiDrag = false;
 
 bool BeginDrag(float x, float y) {
     std::lock_guard<std::mutex> lk(g_mtx);
@@ -239,8 +292,9 @@ bool BeginDrag(float x, float y) {
     g_anchorX = x; g_anchorY = y;
     g_px = x; g_py = y;
     g_downTime = NowMs();
-    Dispatch(0 /*ACTION_DOWN*/, x, y);
+    if (!Dispatch(0 /*ACTION_DOWN*/, x, y)) return false;
     g_dragging = true;
+    g_uiDrag = true;
     return true;
 }
 
@@ -257,6 +311,7 @@ bool EndDrag() {
     if (!g_dragging) return false;
     Dispatch(1 /*ACTION_UP*/, g_px, g_py);
     g_dragging = false;
+    g_uiDrag = false;
     return true;
 }
 
@@ -279,11 +334,12 @@ bool Nudge(float dx, float dy) {
     const float ay = sh * ClampF(g_cfg.aimAnchorY, 0.15f, 0.90f);
 
     std::lock_guard<std::mutex> lk(g_mtx);
+    if (g_uiDrag) return false;              // 菜单正在被拖，这一帧不许抢手指
     if (!g_dragging) {
         g_anchorX = ax; g_anchorY = ay;
         g_downTime = NowMs();
         g_px = ax; g_py = ay;
-        Dispatch(0, g_px, g_py);           // ACTION_DOWN
+        if (!Dispatch(0, g_px, g_py)) return false;   // ACTION_DOWN 没进去就别装已按下
         g_dragging = true;
     }
     // 手指漂出安全区就抬起重按，长时间按住会被某些游戏当成"长按"处理
@@ -291,10 +347,11 @@ bool Nudge(float dx, float dy) {
         Dispatch(1, g_px, g_py);           // ACTION_UP
         g_downTime = NowMs();
         g_px = ax; g_py = ay;
-        Dispatch(0, g_px, g_py);           // 重新 ACTION_DOWN
+        if (!Dispatch(0, g_px, g_py)) { g_dragging = false; return false; }  // 重按失败要清状态
     }
-    g_px += dx; g_py += dy;
-    Dispatch(2, g_px, g_py);               // ACTION_MOVE
+    const float nx = g_px + dx, ny = g_py + dy;
+    if (!Dispatch(2, nx, ny)) return false;            // 投递失败不推进内部坐标
+    g_px = nx; g_py = ny;                              // ACTION_MOVE
     return true;
 }
 
